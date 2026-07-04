@@ -43,6 +43,7 @@ jobs:
         uses: ncipollo/release-action@v1
         if: success()
         with:
+          allowUpdates: true  # same-day re-runs update the existing release instead of failing 422
           makeLatest: true
           removeArtifacts: true
           artifacts: howlongtobeat_games.csv
