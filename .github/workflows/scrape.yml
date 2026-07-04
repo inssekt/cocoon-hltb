@@ -5,6 +5,10 @@ on:
   schedule:
     - cron: '0 1 * * 0'  # every Sunday at 01:00 UTC
 
+permissions:
+  contents: write  # create releases
+  actions: write   # keep-alive: re-enable own schedule
+
 jobs:
   scrape:
     runs-on: ubuntu-latest
@@ -12,6 +16,13 @@ jobs:
     steps:
       - name: 📥 Checkout repository
         uses: actions/checkout@v3
+
+      # GitHub disables scheduled workflows after 60 days without repo
+      # activity; releases don't count. Re-enabling ourselves resets the clock.
+      - name: ♻️ Keep schedule alive
+        run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/scrape.yml/enable"
+        env:
+          GH_TOKEN: ${{ github.token }}
 
       - name: 🟢 Set up Node.js
         uses: actions/setup-node@v4
