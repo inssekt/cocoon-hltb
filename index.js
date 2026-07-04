@@ -30,7 +30,7 @@ const baseBody = {
   searchOptions: {
     games: {
       userId: 0,
-      platform: "PC",
+      platform: "", // all platforms — "PC" missed every console-exclusive game
       sortCategory: "popular",
       rangeCategory: "main",
       rangeTime: { min: null, max: null },
