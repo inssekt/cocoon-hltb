@@ -55,47 +55,64 @@ const refreshToken = async() => {
   hpVal = res.hpVal;
 }
 
+const PAGE_ATTEMPTS = 6; // exponential backoff: ~2+4+8+16+32s rides out transient 503 bursts
+
 const fetchPage = async (pageNum) => {
-  const body = JSON.stringify({ ...baseBody, searchPage: pageNum, [hpKey]: hpVal });
-  const doSearch = async(token, hp_key, hp_val) => {
+  const doSearch = async() => {
+    // Rebuild the body each attempt: refreshToken() rotates hpKey/hpVal.
+    const body = JSON.stringify({ ...baseBody, searchPage: pageNum, [hpKey]: hpVal });
     return await fetch('https://howlongtobeat.com/api/bleed', {
       method: 'POST',
       headers: { ...headers, ...{
-        "x-auth-token": token,
-        "x-hp-key": hp_key,
-        "x-hp-val": hp_val,
+        "x-auth-token": authToken,
+        "x-hp-key": hpKey,
+        "x-hp-val": hpVal,
       }},
       body
     });
   }
 
-  let response = await doSearch(authToken, hpKey, hpVal);
-  if (response.status == 403) {
-    await refreshToken();
-    response = await doSearch(authToken, hpKey, hpVal);
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const response = await doSearch();
+      if (response.ok) return response.json();
+      if (response.status == 403) {
+        await refreshToken();
+        continue;
+      }
+      throw new Error(`HTTP ${response.status}`);
+    } catch (err) {
+      if (attempt >= PAGE_ATTEMPTS - 1) throw new Error(`Failed to fetch page ${pageNum}: ${err.message}`);
+      await delay(2000 * 2 ** attempt + Math.random() * 1000);
+    }
   }
-  if (!response.ok) throw new Error(`Failed to fetch page ${pageNum}: ${response.status}`);
-  return response.json();
 };
 
 const fetchDataFromGameId = async (gameId) => {
   await delay(Math.random() * 100); // 0–100ms delay
   const url = `https://howlongtobeat.com/game/${gameId}`;
 
-  try {
-    const response = await fetch(url, { headers });
-    const html = await response.text();
-    const match = html.match(/<script id="__NEXT_DATA__" type="application\/json">(.+?)<\/script>/);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const response = await fetch(url, { headers });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const html = await response.text();
+      const match = html.match(/<script id="__NEXT_DATA__" type="application\/json">(.+?)<\/script>/);
 
-    if (!match || match.length < 2) throw new Error(`No __NEXT_DATA__ for game ${gameId}`);
+      if (!match || match.length < 2) throw new Error(`No __NEXT_DATA__ for game ${gameId}`);
 
-    const nextData = JSON.parse(match[1]);
-    return nextData?.props?.pageProps?.game?.data?.game[0] || null;
+      const nextData = JSON.parse(match[1]);
+      return nextData?.props?.pageProps?.game?.data?.game[0] || null;
 
-  } catch (err) {
-    console.warn(`⚠️ Fetch failed for game ${gameId}: ${err.message}`);
-    return null;
+    } catch (err) {
+      if (attempt === 2) {
+        console.warn(`⚠️ Fetch failed for game ${gameId}: ${err.message}`);
+        return null;
+      }
+      await delay(2000 * 2 ** attempt + Math.random() * 1000);
+    }
   }
+  return null;
 };
 
 const writeRowToCSV = (row, isFirstRow = false) => {
@@ -134,6 +151,7 @@ const writeRowToCSV = (row, isFirstRow = false) => {
 
     // Fetch all Steam IDs in parallel
     console.log(`🚀 Fetching Steam IDs using ${CONCURRENCY} threads...`);
+    let gamesFailed = 0;
     const gameFetchPromises = allGames.map(game => limit(async () => {
       const gameData = await fetchDataFromGameId(game.game_id);
       if (gameData) {
@@ -145,6 +163,8 @@ const writeRowToCSV = (row, isFirstRow = false) => {
           gameData.comp_100
         ];
         writeRowToCSV(row, false);
+      } else {
+        gamesFailed++;
       }
       gamesProcessed++;
       if (gamesProcessed % 100 === 0 || gamesProcessed === allGames.length) {
@@ -153,7 +173,13 @@ const writeRowToCSV = (row, isFirstRow = false) => {
     }));
 
     await Promise.all(gameFetchPromises);
-    console.log(`🎉 All done! CSV saved at ${outputPath}`);
+
+    // Don't publish a gutted dataset: a small residue of failures is fine, a large one means
+    // HLTB was blocking us and the release would silently lose thousands of games.
+    if (gamesFailed > allGames.length * 0.05) {
+      throw new Error(`Refusing to publish: ${gamesFailed}/${allGames.length} game fetches failed`);
+    }
+    console.log(`🎉 All done! ${gamesFailed} of ${allGames.length} games failed. CSV saved at ${outputPath}`);
 
   } catch (error) {
     console.error("❌ Error:", error);
